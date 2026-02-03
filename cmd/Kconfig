@@ -2180,6 +2180,15 @@ config CMD_DNS
 	help
 	  Lookup the IP of a hostname
 
+config CMD_FWDISCOVER
+	bool "fwdiscover"
+	depends on NET_LWIP
+	select PROT_UDP_LWIP
+	help
+	  Firmware discovery protocol. Broadcasts UDP requests to discover
+	  firmware servers and retrieves firmware URL for network boot.
+	  Sets environment variable 'firmware_url' with the discovered URL.
+
 config CMD_MII
 	bool "mii"
 	imply CMD_MDIO
