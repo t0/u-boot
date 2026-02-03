@@ -1112,6 +1112,14 @@ config CMD_BCB
 	    https://android.googlesource.com/platform/bootable/recovery
 	  - Inspect/dump the contents of the BCB fields
 
+config CMD_DISPLAY
+	bool "display - Control OLED display"
+	depends on DM_I2C
+	help
+	  Control OLED display (SSD1306 compatible) connected via I2C.
+	  Supports text display, logo graphics, and power control.
+	  Hardware-specific to T0 CRS board (I2C bus 2, addr 0x3c).
+
 config CMD_BIND
 	bool "bind/unbind - Bind or unbind a device to/from a driver"
 	depends on DM
