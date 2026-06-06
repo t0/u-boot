@@ -14,12 +14,15 @@
 #include <lwip/udp.h>
 #include <lwip/pbuf.h>
 #include <lwip/timeouts.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 
 #define FWDISCO_PORT 9875
 #define FWDISCO_TIMEOUT 1000  /* 1 second timeout per iteration */
 #define FWDISCO_DEFAULT_ITERATIONS 3
 #define FWDISCO_MAX_ITERATIONS 10
-#define FWDISCO_VERSION "1.0"
+#define FWDISCO_VERSION "1"
 #define FWDISCO_MAX_RESPONSE_LEN 1500
 
 /* State for the discovery protocol */
@@ -69,13 +72,15 @@ static void fwdisco_recv_callback(void *arg, struct udp_pcb *pcb,
 	pbuf_free(p);
 
 	/*
-	 * Response format (blank-line separated):
-	 *   FWRESP <version>\n
-	 *   [header fields, maybe, later on]\n
+	 *   FWRESP/1\n
+	 *   ncip : <host ip> \n
+	 *   ncinport : <port to listen on> \n
+	 *   ncoutport : <port host listens on> \n
 	 *   \n
-	 *   <command>
+	 *   <body>
+	 *   commands are no longer supported in FWRESP
 	 */
-	if (strncmp(response, "FWRESP ", 7) != 0) {
+	if (strncmp(response, "FWRESP/", 7) != 0) {
 		free(response);
 		return;
 	}
@@ -89,22 +94,79 @@ static void fwdisco_recv_callback(void *arg, struct udp_pcb *pcb,
 	}
 	body += 2;
 
-	/* NUL-terminate version (between "FWRESP " and first \n) */
+	/* NUL-terminate the first line (between "FWRESP/" and first \n) */
 	char *eol = strchr(response + 7, '\n');
 	if (eol)
 		*eol = '\0';
-	env_set("firmware_version", response + 7);
+
+	/* check if the protocol version matches FWDISCO_VERSION */
+	char *fwdisco_version = response + 7;
+	while (*fwdisco_version == ' ')
+		fwdisco_version++;
+	char *eov = strchr(fwdisco_version, ' ');
+	if (eov)
+		*eov = '\0';
+	if (strcmp(fwdisco_version, FWDISCO_VERSION) != 0) {
+		free(response);
+		return;
+	}
 
 	/* Store server IP */
 	ipaddr_ntoa_r(addr, server_ip, sizeof(server_ip));
 	env_set("firmware_server", server_ip);
 
-	printf("Firmware discovery: response from %s (version %s)\n",
-	       server_ip, response + 7);
+	printf("Firmware discovery: response from %s (FWRESP version %s)\n",
+	       server_ip, fwdisco_version);
 
-	/* Store command */
-	printf("  Command: %s\n", body);
-	env_set("firmware_boot_cmd", body);
+	/* Parse header key:value pairs */
+	bool got_ncip = false;
+	bool got_nc = false;
+	char *bol = eol + 1;
+	char *colon, *key, *kend, *value, *vend;
+	while (bol < body - 1) {
+		eol = strchr(bol, '\n');
+		if (!eol)
+			break;
+		*eol = '\0';
+
+		colon = strchr(bol, ':');
+		if (!colon)
+			continue;
+		*colon = '\0';
+
+		/* split key/value at the colon */
+		key = bol;
+		kend = colon;
+		value = colon + 1;
+		vend = eol;
+
+		while (*key == ' ')
+			key++;
+		while (kend > key && (*(kend - 1) == ' '))
+			*--kend = '\0';
+		while (*value == ' ')
+			value++;
+		while (vend > value && (*(vend - 1) == ' '))
+			*--vend = '\0';
+
+		/* set nc vars if present */
+		if (strcmp(key, "ncip") == 0) {
+			env_set("ncip", value);
+			got_ncip = true;
+		} else if (strcmp(key, "ncinport") == 0) {
+			env_set("ncinport", value);
+		} else if (strcmp(key, "ncoutport") == 0) {
+			env_set("ncoutport", value);
+		}
+
+		bol = eol + 1;
+	}
+
+	if (got_ncip) {
+		env_set("stdout", "nc");
+		env_set("stderr", "nc");
+		env_set("stdin", "nc");
+	}
 
 	fwdisco_state.found = 1;
 	fwdisco_state.done = 1;
@@ -122,7 +184,7 @@ static void fwdisco_send(void)
 	int len;
 	ip_addr_t broadcast;
 	err_t err;
-	const char *mfr, *name, *rev, *serial;
+	const char *mfr, *name, *rev, *serial, *bootloader, *bootloader_version;
 
 	/* Prepare broadcast IP */
 	IP_ADDR4(&broadcast, 255, 255, 255, 255);
@@ -139,14 +201,19 @@ static void fwdisco_send(void)
 	name = env_get("board_name");
 	rev = env_get("board_rev");
 	serial = env_get("board_serial");
+	bootloader = env_get("bootloader");
+	bootloader_version = env_get("bootloader_version");
 
 	payload = (char *)p->payload;
-	len = snprintf(payload, 128, "FWREQ %s %s-%s-rev%s %s",
+	len = snprintf(payload, 128,
+		       "FWREQ/%s\nManufacturer: %s\nProduct: %s\nRevision: %s\nSerial: %s\nBootloader: %s\nBootloader Version: %s\n\n",
 		       FWDISCO_VERSION,
 		       mfr ? mfr : "unknown",
 		       name ? name : "unknown",
 		       rev ? rev : "?",
-		       serial ? serial : "unknown");
+		       serial ? serial : "unknown",
+		       bootloader ? bootloader : "unknown",
+		       bootloader_version ? bootloader_version : "unknown");
 
 	pbuf_realloc(p, len);
 
@@ -316,7 +383,8 @@ U_BOOT_CMD(
 	"    - Serial from $board_serial sent for server-side filtering\n"
 	"    - Sets environment variables on success:\n"
 	"        firmware_server: IP address of responding server\n"
-	"        firmware_version: protocol version from server\n"
-	"        firmware_boot_cmd: command from server\n"
+	"        ncip: IP address for netconsole to send packets to\n"
+	"        ncinport: port netconsole listens on\n"
+	"        ncoutport: destination port netconsole will send packets to\n"
 	"    - Example: fwdiscover 5"
 );
