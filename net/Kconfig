@@ -31,12 +31,6 @@ config BOOTP_SEND_HOSTNAME
 	  of the "hostname" environment variable is passed as
 	  option 12 to the DHCP server.
 
-config NETCONSOLE
-	bool "NetConsole support"
-	help
-	  Support the 'nc' input/output device for networked console.
-	  See doc/usage/netconsole.rst for details.
-
 config IP_DEFRAG
 	bool "Support IP datagram reassembly"
 	help
@@ -254,6 +248,23 @@ config TFTP_BLOCKSIZE
 	  1468 (MTU minus eth.hdrs) provides a good throughput with
 	  almost-MTU block sizes.
 	  You can also activate CONFIG_IP_DEFRAG to set a larger block.
+
+config NETCONSOLE
+	bool "NetConsole support"
+	select PROT_UDP_LWIP if NET_LWIP
+	help
+	  Support the 'nc' input/output device for networked console.
+	  See doc/usage/netconsole.rst for details.
+
+config NETCONSOLE_BUFFER_SIZE
+	int "Netconsole buffer size"
+	default 512
+	help
+	  Default Netconsole buffer size. Note that the buffer only includes
+	  the data payload and not the packet header. The ethernet MTU is
+	  typically 1500 bytes, so keep the buffer size reasonably below this.
+	  If you are considering using xmodem1k over netconsole, ensure that
+	  the buffer size exceeds 1024.
 
 endif   # if NET || NET_LWIP
 
