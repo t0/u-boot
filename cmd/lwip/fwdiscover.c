@@ -163,9 +163,9 @@ static void fwdisco_recv_callback(void *arg, struct udp_pcb *pcb,
 	}
 
 	if (got_ncip) {
-		env_set("stdout", "nc");
-		env_set("stderr", "nc");
-		env_set("stdin", "nc");
+		env_set("stdout", "nc,serial");
+		env_set("stderr", "nc,serial");
+		env_set("stdin", "nc,serial");
 	}
 
 	fwdisco_state.found = 1;
