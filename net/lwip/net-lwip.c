@@ -41,6 +41,14 @@ char *pxelinux_configfile;
 struct in_addr	net_ip;
 char net_boot_file_name[1024];
 
+/* Nonzero while the lwIP input or output path is on the call stack. */
+static int net_stack_depth;
+
+bool net_lwip_busy(void)
+{
+	return net_stack_depth > 0;
+}
+
 static err_t net_lwip_tx(struct netif *netif, struct pbuf *p)
 {
 	struct udevice *udev = netif->state;
@@ -64,7 +72,9 @@ static err_t net_lwip_tx(struct netif *netif, struct pbuf *p)
 		memcpy(pp, p->payload, p->len);
 	}
 
+	net_stack_depth++;
 	err = eth_get_ops(udev)->send(udev, pp ? pp : p->payload, p->len);
+	net_stack_depth--;
 	free(pp);
 	if (err) {
 		debug("send error %d\n", err);
@@ -320,13 +330,28 @@ int net_lwip_rx(struct udevice *udev, struct netif *netif)
 	int len;
 	int i;
 
+	/*
+	 * Refuse reentry: a breakable driver wait inside an in-flight
+	 * transfer can land here via ctrlc() -> tstc() -> a network-
+	 * backed console device. Anything transmitted from this context
+	 * (an inline ARP reply, an etharp_tmr() retransmit) would nest
+	 * a send inside the driver's active send and corrupt its
+	 * descriptor state.
+	 */
+	if (net_lwip_busy())
+		return 0;
+
+	net_stack_depth++;
+
 	/* lwIP timers */
 	sys_check_timeouts();
 	/* Other tasks and actions */
 	schedule();
 
-	if (!eth_is_active(udev))
+	if (!eth_is_active(udev)) {
+		net_stack_depth--;
 		return -EINVAL;
+	}
 
 	flags = ETH_RECV_CHECK_DEVICE;
 	for (i = 0; i < ETH_PACKETS_BATCH_RECV; i++) {
@@ -353,6 +378,7 @@ int net_lwip_rx(struct udevice *udev, struct netif *netif)
 	if (len == -EAGAIN)
 		len = 0;
 
+	net_stack_depth--;
 	return len;
 }
 

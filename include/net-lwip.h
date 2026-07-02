@@ -42,6 +42,9 @@ struct netif *net_lwip_get_netif(void);
 int net_lwip_rx(struct udevice *udev, struct netif *netif);
 int net_lwip_dns_resolve(char *name_or_ip, ip_addr_t *ip);
 
+/* Network-backed console devices must not re-enter the network stack */
+bool net_lwip_busy(void);
+
 /**
  * wget_validate_uri() - varidate the uri
  *
