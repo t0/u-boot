@@ -293,8 +293,7 @@ static void nc_send_packet(const char *buf, int len)
 
 	/* Netconsole output is best-effort: drop transmits to unknown MAC
 	 * addresses, rather than queueing pbufs until an ARP entry shows up. */
-	if (!nc_arp_resolve())
-		return;
+	nc_arp_resolve();
 
 	p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
 	if (!p)
