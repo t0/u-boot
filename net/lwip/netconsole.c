@@ -21,10 +21,6 @@
 #include <lwip/udp.h>
 #include <lwip/etharp.h>
 
-#ifndef CONFIG_NETCONSOLE_BUFFER_SIZE
-#define CONFIG_NETCONSOLE_BUFFER_SIZE 512
-#endif
-
 static char input_buffer[CONFIG_NETCONSOLE_BUFFER_SIZE];
 static int input_size; /* char count in input buffer */
 static int input_offset; /* offset to valid chars in input buffer */
@@ -37,8 +33,25 @@ static u16_t nc_in_port; /* source input port */
 
 /* lwIP-specific state */
 static struct udp_pcb *nc_pcb;
-static struct netif *nc_netif;
 static u16_t nc_bound_port;
+
+static struct netif *nc_get_netif(void)
+{
+	struct udevice *udev;
+	struct netif *current = net_lwip_get_netif();
+
+	if (current)
+		return current;
+
+	if (net_lwip_eth_start() < 0)
+		return NULL;
+
+	udev = eth_get_dev();
+	if (!udev)
+		return NULL;
+
+	return net_lwip_new_netif(udev);
+}
 
 static int is_broadcast(ip_addr_t ip)
 {
@@ -83,11 +96,13 @@ static int refresh_settings_from_env(void)
 	/* update only when the environment has changed */
 	if (env_changed_id != env_id) {
 		char *tmp = env_get("ncip");
+
 		if (tmp) {
 			/* splits tmp into ip:port */
 			const char *colon = strchr(tmp, ':');
 			size_t n = colon ? (size_t)(colon - tmp) : strlen(tmp);
 			char ipstr[16];
+
 			if (n >= sizeof(ipstr))
 				return -1;
 			memcpy(ipstr, tmp, n);
@@ -129,12 +144,6 @@ static void nc_teardown(void)
 		nc_pcb = NULL;
 		nc_bound_port = 0;
 	}
-	if (nc_netif) {
-		if (net_lwip_get_netif() == nc_netif)
-			netif_remove(nc_netif);
-		free(nc_netif);
-		nc_netif = NULL;
-	}
 }
 
 /*
@@ -149,19 +158,25 @@ static bool nc_arp_resolve(void)
 {
 	static ulong last;
 	/* Unused, but required: etharp_find_addr() writes through its
-	 * out-parameters without checking them for NULL. */
+	 * out-parameters without checking them for NULL.
+	 */
 	struct eth_addr *ethaddr;
 	const ip4_addr_t *ipaddr;
+	struct netif *netif;
 
 	if (nc_ip_bcast)
 		return true; /* broadcast needs no ARP */
 
-	if (etharp_find_addr(nc_netif, ip_2_ip4(&nc_ip),
+	netif = nc_get_netif();
+	if (!netif)
+		return false;
+
+	if (etharp_find_addr(netif, ip_2_ip4(&nc_ip),
 			     &ethaddr, &ipaddr) >= 0)
 		return true;
 
 	if (!last || get_timer(last) >= ARP_TMR_INTERVAL) {
-		etharp_query(nc_netif, ip_2_ip4(&nc_ip), NULL);
+		etharp_query(netif, ip_2_ip4(&nc_ip), NULL);
 		last = get_timer(0);
 	}
 
@@ -170,7 +185,7 @@ static bool nc_arp_resolve(void)
 
 /* Copies a received datagram's payload into input_buffer */
 static void nc_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
-			    const ip_addr_t *addr, u16_t port)
+		    const ip_addr_t *addr, u16_t port)
 {
 	int end, chunk, len;
 
@@ -214,50 +229,15 @@ static void nc_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 	/* The client is reachable (it just sent us a packet), but lwIP
 	 * does not update the ARP cache from incoming IP frames. If necessary,
 	 * initiate an ARP request so the reply arrives before the next
-	 * nc_send_packet call needs it. */
+	 * nc_send_packet call needs it.
+	 */
 	nc_arp_resolve();
 
 	pbuf_free(p);
 }
 
-/*
- * Makes sure the device, netif, and bound UDP PCB exist before
- * sending or polling for packets; rebuilds each if needed.
- */
-static int ensure_netif_up(void)
+static int nc_ensure_pcb(void)
 {
-	struct netif *current = net_lwip_get_netif();
-	struct udevice *udev;
-
-	if (nc_netif && current == nc_netif) {
-		if (nc_pcb && nc_bound_port == nc_in_port)
-			return 0;
-	} else if (current) {
-		/* Another command owns the interface: every lwIP command
-		 * brackets its work between net_lwip_new_netif() and
-		 * net_lwip_remove_netif(), so a foreign netif means that
-		 * command is mid-operation. Rebuilding here would steal
-		 * its netif and eth_halt()/eth_init() the device under
-		 * it. Match the legacy driver ("inside net loop"): stay
-		 * quiescent and rebuild once the netif list is empty. */
-		return -1;
-	} else {
-		nc_teardown();
-	}
-
-	if (net_lwip_eth_start() < 0)
-		return -1;
-
-	udev = eth_get_dev();
-	if (!udev)
-		return -1;
-
-	if (!nc_netif) {
-		nc_netif = net_lwip_new_netif(udev);
-		if (!nc_netif)
-			return -1;
-	}
-
 	if (!nc_pcb) {
 		nc_pcb = udp_new();
 		if (!nc_pcb) {
@@ -281,24 +261,21 @@ static int ensure_netif_up(void)
 static void nc_send_packet(const char *buf, int len)
 {
 	struct pbuf *p;
-
-	/* Inside the network stack - drop the output; see poll_rx() */
-	if (net_lwip_busy())
-		return;
+	struct netif *netif;
 
 	/* Manual checks since there is not net_loop to do it */
 	if (refresh_settings_from_env() < 0)
 		return;
-	if (ensure_netif_up() < 0)
+	if (nc_ensure_pcb() < 0)
+		return;
+
+	netif = nc_get_netif();
+	if (!netif)
 		return;
 
 	/* Drain the RX ring - an ARP reply may be sitting unprocessed. */
-	net_lwip_rx(eth_get_dev(), nc_netif);
-
-	/* Netconsole output is best-effort: drop transmits to unknown MAC
-	 * addresses, rather than queueing pbufs until an ARP entry shows up. */
-	if (!nc_arp_resolve())
-		return;
+	net_lwip_rx(eth_get_dev(), netif);
+	nc_arp_resolve();
 
 	p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
 	if (!p)
@@ -322,6 +299,12 @@ static int nc_stdio_start(struct stdio_dev *dev)
 	retval = refresh_settings_from_env();
 	if (retval != 0)
 		return retval;
+
+	/*
+	 * Initialize the static IP settings and buffer pointers
+	 * incase we call net_send_udp_packet before net_loop
+	 */
+	net_init();
 
 	return 0;
 }
@@ -359,18 +342,25 @@ static void nc_stdio_puts(struct stdio_dev *dev, const char *s)
 /* lwIP analog of net_loop(NETCONS) */
 static int poll_rx(void)
 {
+	struct netif *netif;
+
 	/* We may have been reached from a network driver wait loop that polls
-	 * ctrlc() and must not re-enter the network stack. */
+	 * ctrlc() and must not re-enter the network stack.
+	 */
 	if (net_lwip_busy())
 		return -1;
 
 	/* Manual checks since there is not net_loop to do it */
 	if (refresh_settings_from_env() < 0)
 		return -1;
-	if (ensure_netif_up() < 0)
+	if (nc_ensure_pcb() < 0)
 		return -1;
 
-	net_lwip_rx(eth_get_dev(), nc_netif);
+	netif = nc_get_netif();
+	if (!netif)
+		return -1;
+
+	net_lwip_rx(eth_get_dev(), netif);
 	return 0;
 }
 
@@ -382,7 +372,8 @@ static int nc_stdio_getc(struct stdio_dev *dev)
 
 	while (!input_size) {
 		/* net_lwip_rx() schedules; when polling fails before
-		 * reaching it, keep the watchdog fed ourselves. */
+		 * reaching it, keep the watchdog fed ourselves.
+		 */
 		if (poll_rx() < 0)
 			schedule();
 	}
@@ -402,7 +393,8 @@ static int nc_stdio_tstc(struct stdio_dev *dev)
 {
 	/* tstc() is reachable from inside the network stack (for example,
 	 * zynq_gem_send's TX-done wait polls ctrlc(), which calls tstc()).
-	 * Prevent re-entering the network stack and wedging the MAC. */
+	 * Prevent re-entering the network stack and wedging the MAC.
+	 */
 	if (input_recursion || output_recursion)
 		return 0;
 
