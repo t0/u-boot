@@ -282,10 +282,6 @@ static void nc_send_packet(const char *buf, int len)
 {
 	struct pbuf *p;
 
-	/* Inside the network stack - drop the output; see poll_rx() */
-	if (net_lwip_busy())
-		return;
-
 	/* Manual checks since there is not net_loop to do it */
 	if (refresh_settings_from_env() < 0)
 		return;
