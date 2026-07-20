@@ -40,6 +40,23 @@ static struct udp_pcb *nc_pcb;
 static struct netif *nc_netif;
 static u16_t nc_bound_port;
 
+static struct netif *nc_get_netif(void)
+{
+	struct udevice *udev;
+	struct netif *current = net_lwip_get_netif();
+	if (current)
+		return current;
+
+	if (net_lwip_eth_start() < 0)
+		return NULL;
+
+	udev = eth_get_dev();
+	if (!udev)
+		return NULL;
+
+	return net_lwip_new_netif(udev);
+}
+
 static int is_broadcast(ip_addr_t ip)
 {
 	static ip_addr_t netmask;
@@ -152,16 +169,21 @@ static bool nc_arp_resolve(void)
 	 * out-parameters without checking them for NULL. */
 	struct eth_addr *ethaddr;
 	const ip4_addr_t *ipaddr;
+	struct netif *netif;
 
 	if (nc_ip_bcast)
 		return true; /* broadcast needs no ARP */
 
-	if (etharp_find_addr(nc_netif, ip_2_ip4(&nc_ip),
+	netif = nc_get_netif();
+	if (!netif)
+		return false;
+
+	if (etharp_find_addr(netif, ip_2_ip4(&nc_ip),
 			     &ethaddr, &ipaddr) >= 0)
 		return true;
 
 	if (!last || get_timer(last) >= ARP_TMR_INTERVAL) {
-		etharp_query(nc_netif, ip_2_ip4(&nc_ip), NULL);
+		etharp_query(netif, ip_2_ip4(&nc_ip), NULL);
 		last = get_timer(0);
 	}
 
@@ -220,44 +242,8 @@ static void nc_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 	pbuf_free(p);
 }
 
-/*
- * Makes sure the device, netif, and bound UDP PCB exist before
- * sending or polling for packets; rebuilds each if needed.
- */
-static int ensure_netif_up(void)
+static int nc_ensure_pcb(void)
 {
-	struct netif *current = net_lwip_get_netif();
-	struct udevice *udev;
-
-	if (nc_netif && current == nc_netif) {
-		if (nc_pcb && nc_bound_port == nc_in_port)
-			return 0;
-	} else if (current) {
-		/* Another command owns the interface: every lwIP command
-		 * brackets its work between net_lwip_new_netif() and
-		 * net_lwip_remove_netif(), so a foreign netif means that
-		 * command is mid-operation. Rebuilding here would steal
-		 * its netif and eth_halt()/eth_init() the device under
-		 * it. Match the legacy driver ("inside net loop"): stay
-		 * quiescent and rebuild once the netif list is empty. */
-		return -1;
-	} else {
-		nc_teardown();
-	}
-
-	if (net_lwip_eth_start() < 0)
-		return -1;
-
-	udev = eth_get_dev();
-	if (!udev)
-		return -1;
-
-	if (!nc_netif) {
-		nc_netif = net_lwip_new_netif(udev);
-		if (!nc_netif)
-			return -1;
-	}
-
 	if (!nc_pcb) {
 		nc_pcb = udp_new();
 		if (!nc_pcb) {
@@ -281,15 +267,20 @@ static int ensure_netif_up(void)
 static void nc_send_packet(const char *buf, int len)
 {
 	struct pbuf *p;
+	struct netif *netif;
 
 	/* Manual checks since there is not net_loop to do it */
 	if (refresh_settings_from_env() < 0)
 		return;
-	if (ensure_netif_up() < 0)
+	if (nc_ensure_pcb() < 0)
+		return;
+
+	netif = nc_get_netif();
+	if (!netif)
 		return;
 
 	/* Drain the RX ring - an ARP reply may be sitting unprocessed. */
-	net_lwip_rx(eth_get_dev(), nc_netif);
+	net_lwip_rx(eth_get_dev(), netif);
 
 	/* Netconsole output is best-effort: drop transmits to unknown MAC
 	 * addresses, rather than queueing pbufs until an ARP entry shows up. */
@@ -354,6 +345,8 @@ static void nc_stdio_puts(struct stdio_dev *dev, const char *s)
 /* lwIP analog of net_loop(NETCONS) */
 static int poll_rx(void)
 {
+	struct netif *netif;
+
 	/* We may have been reached from a network driver wait loop that polls
 	 * ctrlc() and must not re-enter the network stack. */
 	if (net_lwip_busy())
@@ -362,10 +355,14 @@ static int poll_rx(void)
 	/* Manual checks since there is not net_loop to do it */
 	if (refresh_settings_from_env() < 0)
 		return -1;
-	if (ensure_netif_up() < 0)
+	if (nc_ensure_pcb() < 0)
 		return -1;
 
-	net_lwip_rx(eth_get_dev(), nc_netif);
+	netif = nc_get_netif();
+	if (!netif)
+		return -1;
+
+	net_lwip_rx(eth_get_dev(), netif);
 	return 0;
 }
 
