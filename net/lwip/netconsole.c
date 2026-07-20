@@ -281,9 +281,6 @@ static void nc_send_packet(const char *buf, int len)
 
 	/* Drain the RX ring - an ARP reply may be sitting unprocessed. */
 	net_lwip_rx(eth_get_dev(), netif);
-
-	/* Netconsole output is best-effort: drop transmits to unknown MAC
-	 * addresses, rather than queueing pbufs until an ARP entry shows up. */
 	nc_arp_resolve();
 
 	p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
