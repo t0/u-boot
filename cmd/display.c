@@ -294,10 +294,9 @@ static int display_clear(void)
 	return 0;
 }
 
-static int display_write_text(const char *text)
+static int display_write_text(const char *text, int row)
 {
 	const char *c;
-	int row = 3;  /* Always write to bottom row */
 	int i;
 
 	/* Set position */
@@ -377,10 +376,22 @@ static int do_display(struct cmd_tbl *cmdtp, int flag, int argc,
 	} else if (strcmp(argv[1], "clear") == 0) {
 		display_clear();
 	} else if (strcmp(argv[1], "write") == 0) {
-		if (argc < 3)
+		if (argc < 3) {
 			return CMD_RET_USAGE;
+		}
 
-		display_write_text(argv[2]);
+		char *end;
+		long row;
+
+		if (argc == 3) {
+			row = 3;
+		} else {
+			row = simple_strtoul(argv[3], &end, 10);
+			if (end == argv[3] || *end || row < 0 || row > 3) {
+				return CMD_RET_FAILURE;
+			}
+		}
+		display_write_text(argv[2], row);
 	} else if (strcmp(argv[1], "logo") == 0) {
 		display_draw_logo();
 	} else if (strcmp(argv[1], "off") == 0) {
@@ -395,11 +406,11 @@ static int do_display(struct cmd_tbl *cmdtp, int flag, int argc,
 }
 
 U_BOOT_CMD(
-	display, 3, 0, do_display,
+	display, 4, 0, do_display,
 	"control OLED display",
 	"init                  - initialize display\n"
 	"display clear                 - clear display\n"
-	"display write <text>          - write text to bottom row\n"
+	"display write <text> [int]    - write text to a row 0-3\n"
 	"display logo                  - display T0 logo\n"
 	"display off                   - turn display off\n"
 	"display on                    - turn display on\n"
