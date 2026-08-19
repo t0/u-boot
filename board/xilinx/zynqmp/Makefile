@@ -4,6 +4,7 @@
 # Michal Simek <michal.simek@amd.com>
 
 obj-y	:= zynqmp.o
+obj-$(CONFIG_T0_CRS_BACKPLANE)	+= t0_backplane.o
 
 ifneq ($(CONFIG_XILINX_PS_INIT_FILE),"")
 PS_INIT_FILE := $(shell cd $(srctree); readlink -f $(CONFIG_XILINX_PS_INIT_FILE))

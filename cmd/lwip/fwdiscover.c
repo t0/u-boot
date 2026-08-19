@@ -23,7 +23,7 @@
 #define FWDISCO_DEFAULT_ITERATIONS 3
 #define FWDISCO_MAX_ITERATIONS 10
 #define FWDISCO_VERSION "1"
-#define FWDISCO_MAX_RESPONSE_LEN 1500
+#define FWDISCO_MAX_PACKET_LEN 1500
 
 /* State for the discovery protocol */
 static struct {
@@ -58,8 +58,8 @@ static void fwdisco_recv_callback(void *arg, struct udp_pcb *pcb,
 
 	/* Copy packet data to null-terminated buffer */
 	len = p->len;
-	if (len >= FWDISCO_MAX_RESPONSE_LEN)
-		len = FWDISCO_MAX_RESPONSE_LEN - 1;
+	if (len >= FWDISCO_MAX_PACKET_LEN)
+		len = FWDISCO_MAX_PACKET_LEN - 1;
 
 	response = malloc(len + 1);
 	if (!response) {
@@ -185,12 +185,13 @@ static void fwdisco_send(void)
 	ip_addr_t broadcast;
 	err_t err;
 	const char *mfr, *name, *rev, *serial, *bootloader, *bootloader_version;
+	const char *backplane_serial, *crate_serial, *backplane_slot;
 
 	/* Prepare broadcast IP */
 	IP_ADDR4(&broadcast, 255, 255, 255, 255);
 
 	/* Allocate packet buffer */
-	p = pbuf_alloc(PBUF_TRANSPORT, 128, PBUF_RAM);
+	p = pbuf_alloc(PBUF_TRANSPORT, FWDISCO_MAX_PACKET_LEN, PBUF_RAM);
 	if (!p) {
 		printf("Firmware discovery: failed to allocate packet\n");
 		return;
@@ -203,17 +204,23 @@ static void fwdisco_send(void)
 	serial = env_get("board_serial");
 	bootloader = env_get("bootloader");
 	bootloader_version = env_get("bootloader_version");
+	backplane_serial = env_get("backplane_serial");
+	crate_serial = env_get("crate_serial");
+	backplane_slot = env_get("backplane_slot");
 
 	payload = (char *)p->payload;
-	len = snprintf(payload, 128,
-		       "FWREQ/%s\nManufacturer: %s\nProduct: %s\nRevision: %s\nSerial: %s\nBootloader: %s\nBootloader Version: %s\n\n",
+	len = snprintf(payload, FWDISCO_MAX_PACKET_LEN,
+		       "FWREQ/%s\nManufacturer: %s\nProduct: %s\nRevision: %s\nSerial: %s\nBootloader: %s\nBootloader Version: %s\nBackplane Serial: %s\nCrate Serial: %s\nBackplane Slot: %s\n\n",
 		       FWDISCO_VERSION,
 		       mfr ? mfr : "unknown",
 		       name ? name : "unknown",
 		       rev ? rev : "?",
 		       serial ? serial : "unknown",
 		       bootloader ? bootloader : "unknown",
-		       bootloader_version ? bootloader_version : "unknown");
+		       bootloader_version ? bootloader_version : "unknown",
+		       backplane_serial ? backplane_serial : "unknown",
+		       crate_serial ? crate_serial : "unknown",
+		       backplane_slot ? backplane_slot : "unknown");
 
 	pbuf_realloc(p, len);
 
