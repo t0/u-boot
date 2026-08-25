@@ -85,3 +85,18 @@ config FRU_SC
 	  the main CPU. SC behaves more or less as slave and have different ID.
 	  If you build U-Boot for SC you should enable this option to get proper
 	  MAC address.
+
+config T0_CRS_BACKPLANE
+	bool "t0.technology CRS backplane FRU"
+	depends on ARCH_ZYNQMP && DM_I2C && I2C_EEPROM
+	depends on !XPL_BUILD
+	help
+	  The t0.technology CRS plugs into a backplane, and each slot
+	  carries an EEPROM holding an IPMI FRU image. Unlike the FRU support
+	  in board/xilinx/common/, this decodes the chassis info area as well
+	  as the board info area, which is where the crate identity and the
+	  per-slot "slot=N" custom field live.
+
+	  Enabling this reads the EEPROM named by the "backplane0" device tree
+	  alias during board_late_init() and exports the result as the
+	  backplane_* and crate_* environment variables.
