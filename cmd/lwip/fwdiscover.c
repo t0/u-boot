@@ -17,6 +17,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <timestamp.h>
 
 #define FWDISCO_PORT 9875
 #define FWDISCO_TIMEOUT 1000  /* 1 second timeout per iteration */
@@ -25,6 +26,7 @@
 #define FWDISCO_VERSION "1"
 #define FWDISCO_MAX_PACKET_LEN 1500
 #define FWDISCO_BOOTLOADER "u-boot"
+#define FWDISCO_BOOTLOADER_DATE U_BOOT_DATE " - " U_BOOT_TIME " " U_BOOT_TZ
 
 /* State for the discovery protocol */
 static struct {
@@ -226,6 +228,7 @@ static void fwdisco_send(void)
 				"Serial: %s\n"
 				"Bootloader: %s\n"
 				"Bootloader Version: %s\n"
+				"Bootloader Date: %s\n"
 				"Backplane Manufacturer: %s\n"
 				"Backplane Model: %s\n"
 				"Backplane Serial: %s\n"
@@ -242,6 +245,7 @@ static void fwdisco_send(void)
 				serial ? serial : "unknown",
 				FWDISCO_BOOTLOADER,
 				bootloader_version ? bootloader_version : "unknown",
+				FWDISCO_BOOTLOADER_DATE,
 				backplane_manufacturer ? backplane_manufacturer : "unknown",
 				backplane_model ? backplane_model : "unknown",
 				backplane_serial ? backplane_serial : "unknown",
