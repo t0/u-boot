@@ -536,12 +536,6 @@ int board_late_init(void)
 	if (multiboot >= 0)
 		env_set_hex("multiboot", multiboot);
 
-	/*
-	 * Refresh the backplane variables ahead of the saved-environment check
-	 * below. The crate and slot describe where this card is physically
-	 * plugged in, which changes when it is moved, so they must never be
-	 * served from a stale saved environment.
-	 */
 	if (IS_ENABLED(CONFIG_T0_CRS_BACKPLANE))
 		t0_backplane_init();
 

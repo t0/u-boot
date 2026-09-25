@@ -24,6 +24,7 @@
 #define FWDISCO_MAX_ITERATIONS 10
 #define FWDISCO_VERSION "1"
 #define FWDISCO_MAX_PACKET_LEN 1500
+#define FWDISCO_BOOTLOADER "u-boot"
 
 /* State for the discovery protocol */
 static struct {
@@ -184,8 +185,11 @@ static void fwdisco_send(void)
 	int len;
 	ip_addr_t broadcast;
 	err_t err;
-	const char *mfr, *name, *rev, *serial, *bootloader, *bootloader_version;
-	const char *backplane_serial, *crate_serial, *backplane_slot;
+	const char *mfr, *name, *rev, *serial, *bootloader_version;
+	const char *backplane_manufacturer, *backplane_model, *backplane_serial;
+	const char *backplane_revision;
+	const char *crate_manufacturer, *crate_model, *crate_serial;
+	const char *crate_revision, *crate_slot;
 
 	/* Prepare broadcast IP */
 	IP_ADDR4(&broadcast, 255, 255, 255, 255);
@@ -197,31 +201,56 @@ static void fwdisco_send(void)
 		return;
 	}
 
-	/* Build request packet: "FWREQ <version> <identifier> <serial>" */
+	/* Build FWREQ packet */
 	mfr = env_get("board_manufacturer");
 	name = env_get("board_name");
 	rev = env_get("board_rev");
 	serial = env_get("board_serial");
-	bootloader = env_get("bootloader");
 	bootloader_version = env_get("bootloader_version");
+	backplane_manufacturer = env_get("backplane_manufacturer");
+	backplane_model = env_get("backplane_model");
 	backplane_serial = env_get("backplane_serial");
+	backplane_revision = env_get("backplane_revision");
+	crate_manufacturer = env_get("crate_manufacturer");
+	crate_model = env_get("crate_model");
 	crate_serial = env_get("crate_serial");
-	backplane_slot = env_get("backplane_slot");
+	crate_revision = env_get("crate_revision");
+	crate_slot = env_get("crate_slot");
 
 	payload = (char *)p->payload;
 	len = snprintf(payload, FWDISCO_MAX_PACKET_LEN,
-		       "FWREQ/%s\nManufacturer: %s\nProduct: %s\nRevision: %s\nSerial: %s\nBootloader: %s\nBootloader Version: %s\nBackplane Serial: %s\nCrate Serial: %s\nBackplane Slot: %s\n\n",
-		       FWDISCO_VERSION,
-		       mfr ? mfr : "unknown",
-		       name ? name : "unknown",
-		       rev ? rev : "?",
-		       serial ? serial : "unknown",
-		       bootloader ? bootloader : "unknown",
-		       bootloader_version ? bootloader_version : "unknown",
-		       backplane_serial ? backplane_serial : "unknown",
-		       crate_serial ? crate_serial : "unknown",
-		       backplane_slot ? backplane_slot : "unknown");
-
+				"FWREQ/%s\n"
+				"Manufacturer: %s\n"
+				"Product: %s\n"
+				"Revision: %s\n"
+				"Serial: %s\n"
+				"Bootloader: %s\n"
+				"Bootloader Version: %s\n"
+				"Backplane Manufacturer: %s\n"
+				"Backplane Model: %s\n"
+				"Backplane Serial: %s\n"
+				"Backplane Revision: %s\n"
+				"Crate Manufacturer: %s\n"
+				"Crate Model: %s\n"
+				"Crate Serial: %s\n"
+				"Crate Revision: %s\n"
+				"Crate Slot: %s\n",
+				FWDISCO_VERSION,
+				mfr ? mfr : "unknown",
+				name ? name : "unknown",
+				rev ? rev : "?",
+				serial ? serial : "unknown",
+				FWDISCO_BOOTLOADER,
+				bootloader_version ? bootloader_version : "unknown",
+				backplane_manufacturer ? backplane_manufacturer : "unknown",
+				backplane_model ? backplane_model : "unknown",
+				backplane_serial ? backplane_serial : "unknown",
+				backplane_revision ? backplane_revision : "unknown",
+				crate_manufacturer ? crate_manufacturer : "unknown",
+				crate_model ? crate_model : "unknown",
+				crate_serial ? crate_serial : "unknown",
+				crate_revision ? crate_revision : "unknown",
+				crate_slot ? crate_slot : "unknown");
 	pbuf_realloc(p, len);
 
 	/* Send UDP broadcast */
