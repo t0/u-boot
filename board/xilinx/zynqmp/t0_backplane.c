@@ -17,23 +17,28 @@
 
 #include "t0_backplane.h"
 
-#define FRU_HDR_LEN		8
+#define FRU_HDR_LEN			8
 #define FRU_AREA_UNIT		8
-#define FRU_AREA_HDR_LEN	2	/* an area's own version and length bytes */
+#define FRU_AREA_HDR_LEN	2
 #define FRU_VERSION_MASK	0x0f
 #define FRU_VERSION_1		1
 
-/* Type/length byte: type in bits 7:6, length in bits 5:0 */
+/* [7:6]: type code [5:0]: length in bytes */
 #define FRU_TYPELEN_TYPE_SHIFT	6
 #define FRU_TYPELEN_LEN_MASK	0x3f
-#define FRU_TYPE_ASCII8		3
-#define FRU_TYPELEN_EOF		0xc1
+#define FRU_TYPE_ASCII8			0b11 /* only supported type code here */
+#define FRU_TYPELEN_EOF			0xc1
 
 /* Bytes preceding the first type/length field in each area */
 #define FRU_CHASSIS_PROLOGUE_LEN	3	/* version, length, chassis type */
-#define FRU_BOARD_PROLOGUE_LEN	6	/* version, length, language, date[3] */
+#define FRU_BOARD_PROLOGUE_LEN		6	/* version, length, language, date[3] */
+#define FRU_PRODUCT_PROLOGUE_LEN	3	/* version, length, language*/
 
 #define T0_SLOT_PREFIX		"slot="
+#define T0_REVISION_PREFIX	"revision="
+
+#define FRU_FIELD_LEN	64
+#define FRU_MAX_CUSTOM	 4
 
 /* offsets are multiples of 8 bytes */
 struct fru_hdr {
@@ -47,7 +52,42 @@ struct fru_hdr {
 	u8 checksum;
 } __packed;
 
-static struct t0_backplane_desc backplane;
+struct fru_custom_fields {
+	int count;
+	char field[FRU_MAX_CUSTOM][FRU_FIELD_LEN];
+};
+
+struct fru_chassis_info {
+	char part_number[FRU_FIELD_LEN];
+	char serial_number[FRU_FIELD_LEN];
+	struct fru_custom_fields custom;
+};
+
+struct fru_board_info {
+	char manufacturer[FRU_FIELD_LEN];
+	char product_name[FRU_FIELD_LEN];
+	char serial_number[FRU_FIELD_LEN];
+	char part_number[FRU_FIELD_LEN];
+	char file_id[FRU_FIELD_LEN];
+	struct fru_custom_fields custom;
+};
+
+struct fru_product_info {
+	char manufacturer[FRU_FIELD_LEN];
+	char product_name[FRU_FIELD_LEN];
+	char part_number[FRU_FIELD_LEN];
+	char product_version[FRU_FIELD_LEN];
+	char serial_number[FRU_FIELD_LEN];
+	char asset_tag[FRU_FIELD_LEN];
+	char file_id[FRU_FIELD_LEN];
+	struct fru_custom_fields custom;
+};
+
+struct fru_info {
+	struct fru_chassis_info chassis_info;
+	struct fru_board_info board_info;
+	struct fru_product_info product_info;
+};
 
 /*
  * FRU regions (header and areas) carry a "zero checksum"
@@ -66,15 +106,17 @@ static bool fru_checksum_ok(const u8 *p, size_t len)
 
 /*
  * Consumes one type/length-encoded field, copying it out as a
- * NULL-terminated string, and returns where the next field starts.
+ * NUL-terminated string, and returns where the next field starts.
  * Only 8-bit ASCII is copied out. Fields in other encodings yield an
- * empty string, but still advance the pointer.
- */
-static const u8 *fru_field(const u8 *p, const u8 *end, char *out,
-			   size_t out_len)
+ * empty string, but still advance the pointer. The copy stops at the
+ * first non-printable byte (including e.g. newlines). */
+static const u8 *fru_parse_field(const u8 *p, const u8 *end, char *out,
+				 size_t out_len)
 {
 	size_t copy = 0;
 	u8 type, len;
+
+	out[0] = '\0'; /* terminated, even on early bailout */
 
 	if (!p || p >= end || *p == FRU_TYPELEN_EOF)
 		return NULL;
@@ -86,17 +128,49 @@ static const u8 *fru_field(const u8 *p, const u8 *end, char *out,
 	if (p + len > end)
 		return NULL;
 
-	if (type == FRU_TYPE_ASCII8)
-		copy = min_t(size_t, len, out_len - 1);
-
-	memcpy(out, p, copy);
+	if (type == FRU_TYPE_ASCII8) {
+		for (int i = 0; i < len && copy < out_len - 1; i++) {
+			if (p[i] < 0x20 || p[i] > 0x7e)
+				break; /* bail on unprintable */
+			out[copy++] = p[i];
+		}
+	}
 	out[copy] = '\0';
 
 	return p + len;
 }
 
-static int fru_locate_area(const u8 *fru, size_t size, u8 offset, size_t prologue,
-		    const u8 **start, const u8 **end)
+static void fru_parse_custom(const u8 *p, const u8 *end,
+			     struct fru_custom_fields *custom)
+{
+	custom->count = 0;
+	while (custom->count < FRU_MAX_CUSTOM) {
+		p = fru_parse_field(p, end, custom->field[custom->count], FRU_FIELD_LEN);
+		if (!p)
+			break;
+		custom->count++;
+	}
+}
+
+static const char *fru_find_custom(const struct fru_custom_fields *c,
+				   const char *prefix)
+{
+	const size_t plen = strlen(prefix);
+
+	for (int i = 0; i < c->count; i++) {
+		if (strncmp(c->field[i], prefix, plen) == 0)
+			return c->field[i] + plen;
+	}
+	return NULL;
+}
+
+/*
+ * Populates pointers for the start and end of the area at the offset of
+ * the fru blob with a given prologue length. *end points at the area
+ * checksum, which is one byte past the last field byte.
+ */
+static int fru_locate_area(const u8 *fru, size_t size, u8 offset,
+			   size_t prologue, const u8 **start, const u8 **end)
 {
 	const u8 *area;
 	size_t len;
@@ -124,44 +198,49 @@ static int fru_locate_area(const u8 *fru, size_t size, u8 offset, size_t prologu
 	return 0;
 }
 
-static void t0_parse_chassis(const u8 *area, const u8 *end,
-			     struct t0_backplane_desc *d)
+static void fru_parse_chassis(const u8 *area, const u8 *end,
+			      struct fru_chassis_info *ci)
 {
-	char custom[T0_BP_FIELD_LEN];
-	const u8 *p;
+	const u8 *p = area + FRU_CHASSIS_PROLOGUE_LEN;
 
-	d->chassis_type = area[2];
-
-	p = area + FRU_CHASSIS_PROLOGUE_LEN;
-	p = fru_field(p, end, d->crate_part, sizeof(d->crate_part));
-	p = fru_field(p, end, d->crate_serial, sizeof(d->crate_serial));
-
-	while ((p = fru_field(p, end, custom, sizeof(custom)))) {
-		if (!strncmp(custom, T0_SLOT_PREFIX, strlen(T0_SLOT_PREFIX))) {
-			d->slot = dectoul(custom + strlen(T0_SLOT_PREFIX), NULL);
-			break;
-		}
-	}
-
-	d->crate_valid = true;
+	p = fru_parse_field(p, end, ci->part_number, sizeof(ci->part_number));
+	p = fru_parse_field(p, end, ci->serial_number, sizeof(ci->serial_number));
+	fru_parse_custom(p, end, &ci->custom);
 }
 
-static void t0_parse_board(const u8 *area, const u8 *end,
-			   struct t0_backplane_desc *d)
+static void fru_parse_board(const u8 *area, const u8 *end,
+			    struct fru_board_info *bi)
 {
 	const u8 *p = area + FRU_BOARD_PROLOGUE_LEN;
 
-	p = fru_field(p, end, d->manufacturer, sizeof(d->manufacturer));
-	p = fru_field(p, end, d->product, sizeof(d->product));
-	p = fru_field(p, end, d->serial, sizeof(d->serial));
-	p = fru_field(p, end, d->part, sizeof(d->part));
+	p = fru_parse_field(p, end, bi->manufacturer, sizeof(bi->manufacturer));
+	p = fru_parse_field(p, end, bi->product_name, sizeof(bi->product_name));
+	p = fru_parse_field(p, end, bi->serial_number, sizeof(bi->serial_number));
+	p = fru_parse_field(p, end, bi->part_number, sizeof(bi->part_number));
+	p = fru_parse_field(p, end, bi->file_id, sizeof(bi->file_id));
+	fru_parse_custom(p, end, &bi->custom);
 }
 
-static int t0_backplane_parse(const u8 *fru, size_t size,
-			      struct t0_backplane_desc *d)
+static void fru_parse_product(const u8 *area, const u8 *end,
+			      struct fru_product_info *pi)
+{
+	const u8 *p = area + FRU_PRODUCT_PROLOGUE_LEN;
+
+	p = fru_parse_field(p, end, pi->manufacturer, sizeof(pi->manufacturer));
+	p = fru_parse_field(p, end, pi->product_name, sizeof(pi->product_name));
+	p = fru_parse_field(p, end, pi->part_number, sizeof(pi->part_number));
+	p = fru_parse_field(p, end, pi->product_version, sizeof(pi->product_version));
+	p = fru_parse_field(p, end, pi->serial_number, sizeof(pi->serial_number));
+	p = fru_parse_field(p, end, pi->asset_tag, sizeof(pi->asset_tag));
+	p = fru_parse_field(p, end, pi->file_id, sizeof(pi->file_id));
+	fru_parse_custom(p, end, &pi->custom);
+}
+
+static int fru_parse(const u8 *fru, size_t size, struct fru_info *fru_info)
 {
 	const struct fru_hdr *hdr = (const struct fru_hdr *)fru;
 	const u8 *area, *end;
+	int ret;
 
 	if (size < FRU_HDR_LEN)
 		return -EINVAL;
@@ -172,25 +251,33 @@ static int t0_backplane_parse(const u8 *fru, size_t size,
 	if (!fru_checksum_ok(fru, FRU_HDR_LEN))
 		return -EBADMSG;
 
-	memset(d, 0, sizeof(*d));
-	d->slot = -1;
+	memset(fru_info, 0, sizeof(*fru_info));
 
-	if (fru_locate_area(fru, size, hdr->board_offset, FRU_BOARD_PROLOGUE_LEN,
-			&area, &end))
-		return -EBADMSG;
+	ret = fru_locate_area(fru, size, hdr->board_offset, FRU_BOARD_PROLOGUE_LEN,
+			      &area, &end);
+	if (!ret)
+		fru_parse_board(area, end, &fru_info->board_info);
+	else if (ret != -ENOENT)
+		return ret;
 
-	t0_parse_board(area, end, d);
+	ret = fru_locate_area(fru, size, hdr->chassis_offset, FRU_CHASSIS_PROLOGUE_LEN,
+			      &area, &end);
+	if (!ret)
+		fru_parse_chassis(area, end, &fru_info->chassis_info);
+	else if (ret != -ENOENT)
+		return ret;
 
-	if (fru_locate_area(fru, size, hdr->chassis_offset, FRU_CHASSIS_PROLOGUE_LEN,
-			&area, &end) == 0)
-		t0_parse_chassis(area, end, d);
-	else
-		debug("%s: no usable chassis area\n", __func__);
+	ret = fru_locate_area(fru, size, hdr->product_offset, FRU_PRODUCT_PROLOGUE_LEN,
+			      &area, &end);
+	if (!ret)
+		fru_parse_product(area, end, &fru_info->product_info);
+	else if (ret != -ENOENT)
+		return ret;
 
 	return 0;
 }
 
-static int t0_backplane_read(struct t0_backplane_desc *d)
+static int fru_read(struct fru_info *f)
 {
 	struct udevice *dev;
 	ofnode node;
@@ -215,44 +302,45 @@ static int t0_backplane_read(struct t0_backplane_desc *d)
 
 	ret = dm_i2c_read(dev, 0, buf, size);
 	if (!ret)
-		ret = t0_backplane_parse(buf, size, d);
+		ret = fru_parse(buf, size, f);
 
 	free(buf);
 
 	return ret;
 }
 
-/*
- * The environment may have been saved while this card sat in a
- * different slot or a different crate.
- */
 static void t0_backplane_env_clear(void)
 {
-	int i;
-
 	static const char * const t0_backplane_vars[] = {
-		"backplane_manufacturer",
-		"backplane_product",
-		"backplane_serial",
-		"backplane_part",
-		"backplane_slot",
-		"crate_type",
-		"crate_part",
+		"crate_model",
 		"crate_serial",
+		"crate_slot",
+		"backplane_manufacturer",
+		"backplane_serial",
+		"backplane_model",
+		"backplane_revision",
+		"crate_manufacturer",
+		"crate_revision"
 	};
 
-	for (i = 0; i < ARRAY_SIZE(t0_backplane_vars); i++)
+	for (int i = 0; i < ARRAY_SIZE(t0_backplane_vars); i++)
 		env_set(t0_backplane_vars[i], NULL);
 }
 
 int t0_backplane_init(void)
 {
-	struct t0_backplane_desc *d = &backplane;
+	struct fru_info fru_info;
+	const struct fru_chassis_info *chassis;
+	const struct fru_board_info *board;
+	const struct fru_product_info *product;
+	const char *slot;
+	ulong slot_num;
+	const char *revision;
 	int ret;
 
 	t0_backplane_env_clear();
 
-	ret = t0_backplane_read(d);
+	ret = fru_read(&fru_info);
 	switch (ret) {
 	case 0:
 		break;
@@ -267,26 +355,25 @@ int t0_backplane_init(void)
 		return 0;
 	}
 
-	env_set("backplane_manufacturer", d->manufacturer);
-	env_set("backplane_product", d->product);
-	env_set("backplane_serial", d->serial);
-	env_set("backplane_part", d->part);
+	chassis = &fru_info.chassis_info;
+	board = &fru_info.board_info;
+	product = &fru_info.product_info;
 
-	if (d->crate_valid) {
-		env_set_ulong("crate_type", d->chassis_type);
-		env_set("crate_part", d->crate_part);
-		env_set("crate_serial", d->crate_serial);
-		if (d->slot >= 0)
-			env_set_ulong("backplane_slot", d->slot);
-	}
+	env_set("crate_model", chassis->part_number);
+	env_set("crate_serial", chassis->serial_number);
+	slot = fru_find_custom(&chassis->custom, T0_SLOT_PREFIX);
+	if (slot && strict_strtoul(slot, 10, &slot_num) == 0)
+		env_set_ulong("crate_slot", slot_num);
 
-	printf("Backplane:\t%s SN %s", d->product, d->serial);
-	if (d->crate_valid) {
-		printf(", crate SN %s", d->crate_serial);
-		if (d->slot >= 0)
-			printf(", slot %d", d->slot);
-	}
-	printf("\n");
+	env_set("backplane_manufacturer", board->manufacturer);
+	env_set("backplane_serial", board->serial_number);
+	env_set("backplane_model", board->part_number);
+	revision = fru_find_custom(&board->custom, T0_REVISION_PREFIX);
+	if (revision)
+		env_set("backplane_revision", revision);
+
+	env_set("crate_manufacturer", product->manufacturer);
+	env_set("crate_revision", product->product_version);
 
 	return 0;
 }
